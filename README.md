@@ -13,10 +13,10 @@ Diagonalization of matrices is one of the most common and time-consuming linear 
 This approach allows us to combine the speed of compiled parallel C++/ScaLAPACK routines with the flexibility of Python, creating a streamlined and efficient solution for large-scale linear algebra operations.
 
 <p align="center">
-<img src="human_vs_machine_time.png" alt="from ddkfk" width="350"/>
+<img src="human_vs_machine_time.png" alt="from ddkfk" width="300"/>
 </p>
 <p align="center">
-<center><sup>https://www.cgl.ucsf.edu/Outreach/bmi219/slides/swc/lec/py01.html</sup></center>
+<p align="center"><sup>https://www.cgl.ucsf.edu/Outreach/bmi219/slides/swc/lec/py01.html</sup></p>
 
 ## Workflow 
 
