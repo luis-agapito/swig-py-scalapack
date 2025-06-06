@@ -1,3 +1,13 @@
+#ifndef CPP_PARALLELLINEARALGEBRA_HPP
+#define CPP_PARALLELLINEARALGEBRA_HPP
+
+#define MKL_Complex16 std::complex<double>
+#define MKL_Complex8 std::complex<float>
+
+// clang-format off
+#include <iostream>
+#include <complex> //std::abs() for complex data
+// clang-format on
 #include "mkl_blacs.h"
 #include "mkl_pblas.h"
 #include "mkl_scalapack.h"
@@ -6,16 +16,32 @@
 #include "mpi.h"
 #include <array>
 #include <cassert>
+#include <cmath> //std::abs() for real data
 #include <iostream>
 #include <vector>
 
-#ifndef CPP_PARALLELLINEARALGEBRA_HPP
-#define CPP_PARALLELLINEARALGEBRA_HPP
+using dcomplex = std::complex<double>;
+using fcomplex = std::complex<float>;
 
-// Based on class Scalapack from https://github.com/yohm/scalapack_cpp
-// Contains wrapper to scalapack eigensolver routines and clases for describing
-// global and local version of distributed matrices.
-class ParallelLinearAlgebra {
+#define assert_macro(x)                                                        \
+  do {                                                                         \
+    if (!(x)) {                                                                \
+      printf("Assertion %s in %s (line %d) failed.\n", #x, __FILE__,           \
+             __LINE__);                                                        \
+      MPI_Abort(MPI_COMM_WORLD, 1);                                            \
+    }                                                                          \
+  } while (0)
+
+// Helper to check whether type is std::complex
+template <typename T> struct is_complex : std::false_type {};
+template <typename T> struct is_complex<std::complex<T>> : std::true_type {};
+
+template <typename T> MPI_Datatype resolveMPIType();
+
+// class DistributedMatrix
+template <typename T> class DistributedMatrix {
+  // Adapted from https://github.com/yohm/scalapack_cpp
+  // Clases for describing global and local version of distributed matrices.
 public:
   static int ICTXT, NPROW, NPCOL, MYROW, MYCOL;
 
@@ -30,84 +56,45 @@ public:
                 << ", " << NPCOL << std::endl;
       MPI_Abort(MPI_COMM_WORLD, 1);
     }
-    // Luis
+    //
     int inegone = -1, ione = 1, izero = 0;
     // sl_init_(&ICTXT, &NPROW, &NPCOL);
-    int int1, int2;
-    blacs_pinfo(&int1, &int2);
-    // std::cout << "blacs_pinfo: my id is: " << int1 << "  . #of procs: " <<
-    // int2 << std::endl;
+    // int int1, int2;
+    // blacs_pinfo(&int1, &int2);
     blacs_get(&inegone, &izero, &ICTXT);
     blacs_gridinit(&ICTXT, "C", &NPROW, &NPCOL);
-
     blacs_gridinfo(&ICTXT, &NPROW, &NPCOL, &MYROW, &MYCOL);
-    // std::cout << "blacs_gridinfo: ICTXT, NPROW, NPCOL, MYROW, MYCOL: " <<
-    // ICTXT << ", " << NPROW << ", "
-    //           << NPCOL << ", " << MYROW << ", " << MYCOL << std::endl;
   }
 
   static void Finalize() {
-    blacs_gridexit(&ICTXT);
-    int blacs_exitcode = 0;
-    blacs_exit(&blacs_exitcode);
+    blacs_gridexit(&ICTXT); // Release the context ICTXT
+    // int continuation = 1; // 0 stops MPI, 1 keeps MPI alive.
+    // blacs_exit(&continuation);
   }
 
   /// Global matrix. The data is stored row-wise (C style)
   /// Notation: M,N (dimensions) and i,j (indices) for rows,columns
-  class GMatrix {
+  class GlobalMatrix {
   public:
-    GMatrix(size_t M, size_t N) : M(M), N(N) { A.resize(M * N, 0.0); }
+    GlobalMatrix(size_t M, size_t N) : M(M), N(N) { A.resize(M * N, 0.0); }
 
     size_t M, N;
-    std::vector<double> A;
+    std::vector<T> A;
 
-    double At(size_t I, size_t J) const { return A.at(I * N + J); }
+    T At(size_t I, size_t J) const { return A.at(J * M + I); }
 
-    void Set(size_t I, size_t J, double val) { A[I * N + J] = val; }
+    void Set(size_t I, size_t J, T val) { A[J * M + I] = val; }
 
-    double *Data() { return A.data(); }
+    T *data() { return A.data(); }
 
     size_t Size() { return A.size(); }
-
-    friend std::ostream &operator<<(std::ostream &os, const GMatrix &gm) {
-      for (size_t i = 0; i < gm.M; i++) {
-        for (size_t j = 0; j < gm.N; j++) {
-          os << gm.At(i, j) << ' ';
-        }
-        os << "\n";
-      }
-      return os;
-    }
-
-    void BcastFrom(int root_rank) {
-      int my_rank;
-      MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-      std::array<uint64_t, 2> sizes = {M, N};
-      MPI_Bcast(sizes.data(), 2, MPI_UINT64_T, root_rank, MPI_COMM_WORLD);
-      if (my_rank != root_rank) {
-        A.resize(M * N);
-      }
-      MPI_Bcast(A.data(), M * N, MPI_DOUBLE, root_rank, MPI_COMM_WORLD);
-    }
-
-    void printMemoryData() {
-      int my_rank;
-      MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-      if (my_rank == 0) {
-        std::cout << "vector : ";
-        for (auto item : A) {
-          std::cout << item << ", ";
-        }
-        std::cout << std::endl;
-      }
-    }
   };
 
-  /// Local matrix for scalapack. The data is stored column-wise (Fortran style)
-  /// Notation: M,N (dimensions) and i,j (indices) for rows,columns
-  class LMatrix {
+  /// Local matrix for scalapack. The data is stored column-wise (Fortran
+  /// style) Notation: M,N (dimensions) and i,j (indices) for rows,columns
+  class LocalMatrix {
   public:
-    LMatrix(int M, int N, int MB, int NB)
+    LocalMatrix(int M, int N, int MB, int NB)
         : M(M), N(N), MB(MB), NB(NB) { // matrix M x N with block NB x MB
       SUB_ROWS = (M / (MB * NPROW)) * MB + std::min(M % (MB * NPROW), MB);
       SUB_COLS = (N / (NB * NPCOL)) * NB + std::min(N % (NB * NPCOL), NB);
@@ -117,7 +104,8 @@ public:
       SUB.resize(SUB_ROWS * SUB_COLS, 0.0);
     }
 
-    LMatrix(const GMatrix &gm, int MB, int NB)
+    // Constructor: initialize local matrix SUB with data from input GMatrix gm.
+    LocalMatrix(const GlobalMatrix &gm, int MB, int NB)
         : M(gm.M), N(gm.N), MB(MB), NB(NB) {
       SUB_ROWS = (M / (MB * NPROW)) * MB + std::min(M % (MB * NPROW), MB);
       SUB_COLS = (N / (NB * NPCOL)) * NB + std::min(N % (NB * NPCOL), NB);
@@ -130,16 +118,41 @@ public:
           auto IJ = ToGlobalCoordinate(i, j);
           size_t I = IJ[0], J = IJ[1];
           if (I < M && J < N) {
-            Set(i, j, gm.At(I, J));
+            Set(i, j, gm.At(I, J)); // SUB[i,j] <-- gm[I,J]
           }
         }
       }
     };
+
+    // Constructor: initialized local matrix SUB with data from input global
+    // buffer 'global_buffer' of size MxN
+    LocalMatrix(T *global_buffer, int M, int N, int MB, int NB)
+        : M(M), N(N), MB(MB), NB(NB) { // matrix M x N with block NB x MB
+      SUB_ROWS = (M / (MB * NPROW)) * MB + std::min(M % (MB * NPROW), MB);
+      SUB_COLS = (N / (NB * NPCOL)) * NB + std::min(N % (NB * NPCOL), NB);
+      int RSRC = 0, CSRC = 0, INFO;
+      descinit(DESC, &M, &N, &MB, &NB, &RSRC, &CSRC, &ICTXT, &SUB_ROWS, &INFO);
+      assert(INFO == 0);
+      // SUB.reserve(SUB_ROWS * SUB_COLS);
+      // SUB.insert(SUB.begin(), global_buffer, global_buffer + M * N); // does
+      // not copy memory
+      SUB.resize(SUB_ROWS * SUB_COLS, 0.0);
+      for (int i = 0; i < SUB_ROWS; i++) {
+        for (int j = 0; j < SUB_COLS; j++) {
+          auto IJ = ToGlobalCoordinate(i, j);
+          size_t I = IJ[0], J = IJ[1];
+          if (I < M && J < N) {
+            Set(i, j, global_buffer[J * M + I]); // SUB[i,j] <-- gm[I,J]
+          }
+        }
+      }
+    }
+
     int M, N;               // size of the global matrix
     int MB, NB;             // block sizes
     int SUB_ROWS, SUB_COLS; // size of the local matrix
     int DESC[9];
-    std::vector<double> SUB;
+    std::vector<T> SUB; // data of local matrix
 
     // convert submatrix index (i,j) at process (p_row, p_col) into global
     // coordinate (I,J)
@@ -158,7 +171,8 @@ public:
       return {I, J};
     }
 
-    // convert global matrix index (I,J) to local coordinate (i,j),(p_row,p_col)
+    // convert global matrix index (I,J) to local coordinate
+    // (i,j),(p_row,p_col)
     std::pair<std::array<size_t, 2>, std::array<int, 2>>
     ToLocalCoordinate(size_t I, size_t J) const {
       // global block coordinate (BI, BJ)
@@ -179,13 +193,13 @@ public:
       return {{i, j}, {p_row, p_col}};
     }
 
-    double At(size_t i, size_t j) const { // get an element at SUB[ (i,j) ]
-      return SUB[i + j * SUB_ROWS];
+    T At(size_t i, size_t j) const { // get an element at SUB[ (i,j) ]
+      return SUB[j * SUB_ROWS + i];
     }
 
-    void Set(size_t i, size_t j, double val) { SUB[i + j * SUB_ROWS] = val; }
+    void Set(size_t i, size_t j, T val) { SUB[j * SUB_ROWS + i] = val; }
 
-    void SetByGlobalCoordinate(size_t I, size_t J, double val) {
+    void SetByGlobalCoordinate(size_t I, size_t J, T val) {
       auto local_pos = ToLocalCoordinate(I, J);
       auto ij = local_pos.first;
       auto proc_grid = local_pos.second;
@@ -194,32 +208,12 @@ public:
       }
     }
 
-    void SetAll(double val) {
-      for (size_t i = 0; i < SUB_ROWS; i++) {
-        for (size_t j = 0; j < SUB_COLS; j++) {
-          auto IJ = ToGlobalCoordinate(i, j);
-          if (IJ[0] < M && IJ[1] < N)
-            Set(i, j, val);
-        }
-      }
-    }
+    T *data() { return SUB.data(); }
 
-    double *Data() { return SUB.data(); }
-
-    friend std::ostream &operator<<(std::ostream &os, const LMatrix &lm) {
-      for (size_t i = 0; i < lm.SUB_ROWS; i++) {
-        for (size_t j = 0; j < lm.SUB_COLS; j++) {
-          os << lm.At(i, j) << ' ';
-        }
-        os << "\n";
-      }
-      return os;
-    }
-
-    GMatrix ConstructGlobalMatrix() const {
-      GMatrix A(M, N);
-      for (size_t i = 0; i < SUB_ROWS; i++) {
-        for (size_t j = 0; j < SUB_COLS; j++) {
+    GlobalMatrix constructGlobalMatrix() const {
+      GlobalMatrix A(M, N);
+      for (size_t j = 0; j < SUB_COLS; j++) {
+        for (size_t i = 0; i < SUB_ROWS; i++) {
           auto IJ = ToGlobalCoordinate(i, j);
           size_t I = IJ[0], J = IJ[1];
           if (I < M && J < N) {
@@ -227,89 +221,418 @@ public:
           }
         }
       }
-      GMatrix AA(M, N);
-      MPI_Allreduce(A.Data(), AA.Data(), M * N, MPI_DOUBLE, MPI_SUM,
+      GlobalMatrix AA(M, N);
+      MPI_Datatype data_type = resolveMPIType<T>();
+      MPI_Allreduce(A.data(), AA.data(), M * N, data_type, MPI_SUM,
                     MPI_COMM_WORLD);
       return AA;
     }
 
-    void DebugPrintAtRoot(std::ostream &out) const {
-      MPI_Barrier(MPI_COMM_WORLD);
-      GMatrix g = ConstructGlobalMatrix();
-      if (ParallelLinearAlgebra::MYROW == 0 &&
-          ParallelLinearAlgebra::MYCOL == 0) {
-        out << g;
+    // ConstructGlobalMatrix in place
+    void constructGlobalMatrix(T *global_buffer) const {
+      GlobalMatrix A(M, N);
+      for (size_t n = 0; n < M * N; n++) {
+        global_buffer[n] = 0;
       }
-      MPI_Barrier(MPI_COMM_WORLD);
-    }
-
-    static LMatrix Identity(int N, int M, int NB, int MB) {
-      LMatrix lm(N, M, NB, MB);
-      for (size_t i = 0; i < lm.SUB_ROWS; i++) {
-        for (size_t j = 0; j < lm.SUB_COLS; j++) {
-          auto IJ = lm.ToGlobalCoordinate(i, j);
-          if (IJ[0] < N && IJ[1] < M && IJ[0] == IJ[1])
-            lm.Set(i, j, 1.0);
+      for (size_t j = 0; j < SUB_COLS; j++) {
+        for (size_t i = 0; i < SUB_ROWS; i++) {
+          auto IJ = ToGlobalCoordinate(i, j);
+          size_t I = IJ[0], J = IJ[1];
+          if (I < M && J < N) {
+            global_buffer[J * M + I] =
+                At(i, j); // global_buffer[I,J] <-- local SUB[i,j]
+          }
         }
       }
-      return lm;
-    }
-
-    void printMemoryData() {
-      int my_rank;
-      MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
-      if (my_rank == 0) {
-        std::cout << "memoryData: ";
-        for (auto item : SUB) {
-          std::cout << item << ", ";
-        }
-        std::cout << std::endl;
-      }
+      GlobalMatrix AA(M, N);
+      MPI_Datatype data_type = resolveMPIType<T>();
+      MPI_Allreduce(MPI_IN_PLACE, global_buffer, M * N, data_type, MPI_SUM,
+                    MPI_COMM_WORLD);
     }
   };
+};
 
-  // computes all eigen vectors/values of a real symmetric matrix
-  // the results are stored in C
-  static void callPDSYEV(LMatrix &la, GMatrix &w, LMatrix &lz) {
-    assert(la.M == lz.M);
-    const size_t M = la.M, N = la.N;
-    int IA = 1, JA = 1, IZ = 1, JZ = 1;
+// Class to Scalapack
+template <typename T> class Scalapack {
+  // Contains wrappers to ScaLAPACK routines
+private:
+  // ------------------------------------------------------
+  // p_sd_syev/p_cz_heev  Eigensolver for Symmetric/Hermitian matrix
+  template <typename T1>
+  static typename std::enable_if<
+      !(is_complex<T1>::value) && std::is_same<T1, float>::value, void>::type
+  p_sd_syev(char *jobz, char *uplo, MKL_INT *n, T1 *a, MKL_INT *ia, MKL_INT *ja,
+            MKL_INT *desca, T1 *w, T1 *z, MKL_INT *iz, MKL_INT *jz,
+            MKL_INT *descz, T1 *work, MKL_INT *lwork) {
+    MKL_INT info;
+    pssyev(jobz, uplo, n, a, ia, ja, desca, w, z, iz, jz, descz, work, lwork,
+           &info);
+    assert_macro(info == 0);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      !(is_complex<T1>::value) && std::is_same<T1, double>::value, void>::type
+  p_sd_syev(char *jobz, char *uplo, MKL_INT *n, T1 *a, MKL_INT *ia, MKL_INT *ja,
+            MKL_INT *desca, T1 *w, T1 *z, MKL_INT *iz, MKL_INT *jz,
+            MKL_INT *descz, T1 *work, MKL_INT *lwork) {
+    MKL_INT info;
+    pdsyev(jobz, uplo, n, a, ia, ja, desca, w, z, iz, jz, descz, work, lwork,
+           &info);
+    assert_macro(info == 0);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      (is_complex<T1>::value) &&
+          std::is_same<typename T1::value_type, float>::value,
+      void>::type
+  p_cz_heev(char *jobz, char *uplo, MKL_INT *n, T1 *a, MKL_INT *ia, MKL_INT *ja,
+            MKL_INT *desca, typename T1::value_type *w, T1 *z, MKL_INT *iz,
+            MKL_INT *jz, MKL_INT *descz, T1 *work, MKL_INT *lwork,
+            typename T1::value_type *rwork, MKL_INT *lrwork) {
+    MKL_INT info;
+    pcheev(jobz, uplo, n, a, ia, ja, desca, w, z, iz, jz, descz, work, lwork,
+           rwork, lrwork, &info);
+    assert_macro(info == 0);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      (is_complex<T1>::value) &&
+          std::is_same<typename T1::value_type, double>::value,
+      void>::type
+  p_cz_heev(char *jobz, char *uplo, MKL_INT *n, T1 *a, MKL_INT *ia, MKL_INT *ja,
+            MKL_INT *desca, typename T1::value_type *w, T1 *z, MKL_INT *iz,
+            MKL_INT *jz, MKL_INT *descz, T1 *work, MKL_INT *lwork,
+            typename T1::value_type *rwork, MKL_INT *lrwork) {
+    MKL_INT info;
+    pzheev(jobz, uplo, n, a, ia, ja, desca, w, z, iz, jz, descz, work, lwork,
+           rwork, lrwork, &info);
+    assert_macro(info == 0);
+  }
 
-    const char jobz = 'V';
-    const char uplo = 'U';
-    double work_query;
-    MKL_INT INFO;
+  // p_sdcz_getrf ------------------------------------------------------
+  template <typename T1>
+  static typename std::enable_if<
+      !(is_complex<T1>::value) && std::is_same<T1, float>::value, void>::type
+  p_sdcz_getrf(MKL_INT *m, MKL_INT *n, T1 *local_a, MKL_INT *ia, MKL_INT *ja,
+               MKL_INT *desca, MKL_INT *local_ipiv) {
+    MKL_INT info = 1;
+    psgetrf(m, n, local_a, ia, ja, desca, local_ipiv, &info);
+    assert_macro(info == 0);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      !(is_complex<T1>::value) && std::is_same<T1, double>::value, void>::type
+  p_sdcz_getrf(MKL_INT *m, MKL_INT *n, T1 *local_a, MKL_INT *ia, MKL_INT *ja,
+               MKL_INT *desca, MKL_INT *local_ipiv) {
+    MKL_INT info = 1;
+    pdgetrf(m, n, local_a, ia, ja, desca, local_ipiv, &info);
+    assert_macro(info == 0);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      (is_complex<T1>::value) &&
+          std::is_same<typename T1::value_type, float>::value,
+      void>::type
+  p_sdcz_getrf(MKL_INT *m, MKL_INT *n, T1 *local_a, MKL_INT *ia, MKL_INT *ja,
+               MKL_INT *desca, MKL_INT *local_ipiv) {
+    MKL_INT info = 1;
+    pcgetrf(m, n, local_a, ia, ja, desca, local_ipiv, &info);
+    assert_macro(info == 0);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      (is_complex<T1>::value) &&
+          std::is_same<typename T1::value_type, double>::value,
+      void>::type
+  p_sdcz_getrf(MKL_INT *m, MKL_INT *n, T1 *local_a, MKL_INT *ia, MKL_INT *ja,
+               MKL_INT *desca, MKL_INT *local_ipiv) {
+    MKL_INT info = 1;
+    pzgetrf(m, n, local_a, ia, ja, desca, local_ipiv, &info);
+    assert_macro(info == 0);
+  }
 
-    // Query (lwork = -1) and allocate WORK
-    MKL_INT lwork = -1;
-    pdsyev(&jobz, &uplo, &la.M, la.Data(), &IA, &JA, la.DESC, w.Data(),
-           lz.Data(), &IZ, &JZ, lz.DESC, &work_query, &lwork, &INFO);
+  // p_sdcz_getri ------------------------------------------------------
+  template <typename T1>
+  static typename std::enable_if<
+      !(is_complex<T1>::value) && std::is_same<T1, float>::value, void>::type
+  p_sdcz_getri(MKL_INT *n, T1 *local_a, MKL_INT *ia, MKL_INT *ja,
+               MKL_INT *desca, MKL_INT *local_ipiv, T1 *local_work,
+               MKL_INT *local_lwork, MKL_INT *local_iwork, MKL_INT *liwork) {
+    MKL_INT info = 1;
+    psgetri(n, local_a, ia, ja, desca, local_ipiv, local_work, local_lwork,
+            local_iwork, liwork, &info);
+    assert_macro(info == 0);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      !(is_complex<T1>::value) && std::is_same<T1, double>::value, void>::type
+  p_sdcz_getri(MKL_INT *n, T1 *local_a, MKL_INT *ia, MKL_INT *ja,
+               MKL_INT *desca, MKL_INT *local_ipiv, T1 *local_work,
+               MKL_INT *local_lwork, MKL_INT *local_iwork, MKL_INT *liwork) {
+    MKL_INT info = 1;
+    pdgetri(n, local_a, ia, ja, desca, local_ipiv, local_work, local_lwork,
+            local_iwork, liwork, &info);
+    assert_macro(info == 0);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      (is_complex<T1>::value) &&
+          std::is_same<typename T1::value_type, float>::value,
+      void>::type
+  p_sdcz_getri(MKL_INT *n, T1 *local_a, MKL_INT *ia, MKL_INT *ja,
+               MKL_INT *desca, MKL_INT *local_ipiv, T1 *local_work,
+               MKL_INT *local_lwork, MKL_INT *local_iwork, MKL_INT *liwork) {
+    MKL_INT info = 1;
+    pcgetri(n, local_a, ia, ja, desca, local_ipiv, local_work, local_lwork,
+            local_iwork, liwork, &info);
+    assert_macro(info == 0);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      (is_complex<T1>::value) &&
+          std::is_same<typename T1::value_type, double>::value,
+      void>::type
+  p_sdcz_getri(MKL_INT *n, T1 *local_a, MKL_INT *ia, MKL_INT *ja,
+               MKL_INT *desca, MKL_INT *local_ipiv, T1 *local_work,
+               MKL_INT *local_lwork, MKL_INT *local_iwork, MKL_INT *liwork) {
+    MKL_INT info = 1;
+    pzgetri(n, local_a, ia, ja, desca, local_ipiv, local_work, local_lwork,
+            local_iwork, liwork, &info);
+    assert_macro(info == 0);
+  }
 
-    lwork = static_cast<MKL_INT>(work_query);
-    // work= (double*)malloc(lwork*sizeof(double));
-    double *work = new double[lwork];
+  // p_sdcz_gemm ------------------------------------------------------
+  template <typename T1>
+  static typename std::enable_if<
+      !(is_complex<T1>::value) && std::is_same<T1, float>::value, void>::type
+  p_sdcz_gemm(const char *transa, const char *transb, const MKL_INT *m,
+              const MKL_INT *n, const MKL_INT *k, const T1 *alpha, const T1 *a,
+              const MKL_INT *ia, const MKL_INT *ja, const MKL_INT *desca,
+              const T1 *b, const MKL_INT *ib, const MKL_INT *jb,
+              const MKL_INT *descb, const T1 *beta, T1 *c, const MKL_INT *ic,
+              const MKL_INT *jc, const MKL_INT *descc) {
 
-    // Do the eigendecomposition
-    pdsyev(&jobz, &uplo, &(la.M), la.Data(), &IA, &JA, la.DESC, w.Data(),
-           lz.Data(), &IZ, &JZ, lz.DESC, work, &lwork, &INFO);
+    psgemm(transa, transb, m, n, k, alpha, a, ia, ja, desca, b, ib, jb, descb,
+           beta, c, ic, jc, descc);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      !(is_complex<T1>::value) && std::is_same<T1, double>::value, void>::type
+  p_sdcz_gemm(const char *transa, const char *transb, const MKL_INT *m,
+              const MKL_INT *n, const MKL_INT *k, const T1 *alpha, const T1 *a,
+              const MKL_INT *ia, const MKL_INT *ja, const MKL_INT *desca,
+              const T1 *b, const MKL_INT *ib, const MKL_INT *jb,
+              const MKL_INT *descb, const T1 *beta, T1 *c, const MKL_INT *ic,
+              const MKL_INT *jc, const MKL_INT *descc) {
 
-    // Print eigenvects
-    ParallelLinearAlgebra::GMatrix z = lz.ConstructGlobalMatrix();
+    pdgemm(transa, transb, m, n, k, alpha, a, ia, ja, desca, b, ib, jb, descb,
+           beta, c, ic, jc, descc);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      (is_complex<T1>::value) &&
+          std::is_same<typename T1::value_type, float>::value,
+      void>::type
+  p_sdcz_gemm(const char *transa, const char *transb, const MKL_INT *m,
+              const MKL_INT *n, const MKL_INT *k, const T1 *alpha, const T1 *a,
+              const MKL_INT *ia, const MKL_INT *ja, const MKL_INT *desca,
+              const T1 *b, const MKL_INT *ib, const MKL_INT *jb,
+              const MKL_INT *descb, const T1 *beta, T1 *c, const MKL_INT *ic,
+              const MKL_INT *jc, const MKL_INT *descc) {
+
+    pcgemm(transa, transb, m, n, k, alpha, a, ia, ja, desca, b, ib, jb, descb,
+           beta, c, ic, jc, descc);
+  }
+  template <typename T1>
+  static typename std::enable_if<
+      (is_complex<T1>::value) &&
+          std::is_same<typename T1::value_type, double>::value,
+      void>::type
+  p_sdcz_gemm(const char *transa, const char *transb, const MKL_INT *m,
+              const MKL_INT *n, const MKL_INT *k, const T1 *alpha, const T1 *a,
+              const MKL_INT *ia, const MKL_INT *ja, const MKL_INT *desca,
+              const T1 *b, const MKL_INT *ib, const MKL_INT *jb,
+              const MKL_INT *descb, const T1 *beta, T1 *c, const MKL_INT *ic,
+              const MKL_INT *jc, const MKL_INT *descc) {
+
+    pzgemm(transa, transb, m, n, k, alpha, a, ia, ja, desca, b, ib, jb, descb,
+           beta, c, ic, jc, descc);
+  }
+
+public:
+  // matrixInversion() for real or complex data
+  static void matrixInversion(MPI_Comm comm, T *global_A, int M, int N,
+                              const int MB, const int NB, const int NPROW,
+                              const int NPCOL) {
+
+    int ia = 1, ja = 1;
+    DistributedMatrix<T>::Initialize({NPROW, NPCOL});
+
+    typename DistributedMatrix<T>::LocalMatrix local_A(global_A, M, N, MB, NB);
+
+    MKL_INT *local_ipiv = new MKL_INT[local_A.SUB_ROWS + MB];
+
+    //-----------------------------------
+    p_sdcz_getrf<T>(&M, &N, local_A.data(), &ia, &ja, local_A.DESC, local_ipiv);
+
+    // Query call
+    T query_local_work[1];
+    MKL_INT local_lwork = -1;
+    MKL_INT query_local_iwork[1];
+    MKL_INT liwork = -1;
+    p_sdcz_getri<T>(&N, local_A.data(), &ia, &ja, local_A.DESC, local_ipiv,
+                    query_local_work, &local_lwork, query_local_iwork, &liwork);
+
+    // Computation call
+    local_lwork = static_cast<MKL_INT>(std::abs(query_local_work[0]));
+    liwork = static_cast<MKL_INT>(std::abs(query_local_iwork[0]));
+    T *local_work = new T[local_lwork];
+    MKL_INT *local_iwork = new MKL_INT[local_lwork];
+
+    p_sdcz_getri<T>(&N, local_A.data(), &ia, &ja, local_A.DESC, local_ipiv,
+                    local_work, &local_lwork, local_iwork, &liwork);
 
     // Deallocate memory
-    delete[] work;
+    delete[] local_work;
+    delete[] local_iwork;
+    //-----------------------------------
 
-    if (INFO != 0) {
-      std::cerr << "Error: INFO of callPDSYEV is not zero but " << INFO
-                << std::endl;
-      MPI_Abort(MPI_COMM_WORLD, 2);
-    }
-    assert(INFO == 0);
+    delete[] local_ipiv;
+    local_A.constructGlobalMatrix(global_A);
+
+    DistributedMatrix<T>::Finalize();
+  }
+
+  // EigensolverForHermitian() for real data
+  template <typename T1>
+  static
+      typename std::enable_if<!(is_complex<T1>::value), std::vector<T1>>::type
+      EigensolverForHermitian(MPI_Comm comm, T1 *global_A, int M, int N, int MB,
+                              int NB, const int NPROW, const int NPCOL) {
+
+    DistributedMatrix<T1>::Initialize({NPROW, NPCOL});
+
+    typename DistributedMatrix<T1>::LocalMatrix local_A(global_A, M, N, MB, NB);
+    typename DistributedMatrix<T1>::LocalMatrix local_eigvecs(M, N, MB, NB);
+    std::vector<T1> global_eigvals(M);
+
+    //-----------------------------
+    int IA = 1, JA = 1, IZ = 1, JZ = 1;
+    char jobz = 'V';
+    char uplo = 'U';
+    T1 work_query;
+    // Query (lwork = -1) and allocate WORK
+    MKL_INT lwork = -1;
+    p_sd_syev(&jobz, &uplo, &M, local_A.data(), &IA, &JA, local_A.DESC,
+              global_eigvals.data(), local_eigvecs.data(), &IZ, &JZ,
+              local_eigvecs.DESC, &work_query, &lwork);
+    lwork = static_cast<MKL_INT>(work_query);
+    T1 *work = new T1[lwork];
+    // Do the eigendecomposition
+    p_sd_syev(&jobz, &uplo, &M, local_A.data(), &IA, &JA, local_A.DESC,
+              global_eigvals.data(), local_eigvecs.data(), &IZ, &JZ,
+              local_eigvecs.DESC, work, &lwork);
+    // Deallocate memory
+    delete[] work;
+    //-------------------------------
+
+    local_eigvecs.constructGlobalMatrix(global_A); // overwrites A with
+                                                   // eigvectors
+
+    DistributedMatrix<T1>::Finalize();
+    return global_eigvals;
+  }
+
+  // EigensolverForHermitian() for complex data
+  template <typename T1>
+  static typename std::enable_if<(is_complex<T1>::value),
+                                 std::vector<typename T1::value_type>>::type
+  EigensolverForHermitian(MPI_Comm comm, T1 *global_A, int M, int N, int MB,
+                          int NB, const int NPROW, const int NPCOL) {
+
+    DistributedMatrix<T1>::Initialize({NPROW, NPCOL});
+
+    typename DistributedMatrix<T1>::LocalMatrix local_A(global_A, M, N, MB, NB);
+    typename DistributedMatrix<T1>::LocalMatrix local_eigvecs(M, N, MB, NB);
+
+    using T2 = typename T1::value_type;
+    std::vector<T2> global_eigvals(M);
+
+    //--------------------------------------
+    int IA = 1, JA = 1, IZ = 1, JZ = 1;
+    char jobz = 'V';
+    char uplo = 'U';
+    T1 work_query;
+    T2 rwork_query;
+    // Query (lwork = -1) and allocate WORK
+    MKL_INT lwork = -1;
+    MKL_INT lrwork = -1;
+    p_cz_heev(&jobz, &uplo, &M, local_A.data(), &IA, &JA, local_A.DESC,
+              global_eigvals.data(), local_eigvecs.data(), &IZ, &JZ,
+              local_eigvecs.DESC, &work_query, &lwork, &rwork_query, &lrwork);
+    lwork = static_cast<MKL_INT>(work_query.real());
+    lrwork = static_cast<MKL_INT>(rwork_query);
+    T1 *work = new T1[lwork];
+    T2 *rwork = new T2[lrwork];
+    // Do the eigendecomposition
+    p_cz_heev(&jobz, &uplo, &M, local_A.data(), &IA, &JA, local_A.DESC,
+              global_eigvals.data(), local_eigvecs.data(), &IZ, &JZ,
+              local_eigvecs.DESC, work, &lwork, rwork, &lrwork);
+    // Deallocate memory
+    delete[] work;
+    delete[] rwork;
+    //--------------------------------------
+
+    local_eigvecs.constructGlobalMatrix(global_A); // overwrites A with
+                                                   // eigvectors
+
+    DistributedMatrix<T1>::Finalize();
+    return global_eigvals;
   }
 };
 
-int ParallelLinearAlgebra::ICTXT = -1;
-int ParallelLinearAlgebra::NPROW = -1, ParallelLinearAlgebra::NPCOL = -1;
-int ParallelLinearAlgebra::MYROW = -1, ParallelLinearAlgebra::MYCOL = -1;
+// Definition and initialization of the static member variables
+template <typename T> int DistributedMatrix<T>::ICTXT = -1;
+template <typename T> int DistributedMatrix<T>::NPROW = -1;
+template <typename T> int DistributedMatrix<T>::NPCOL = -1;
+template <typename T> int DistributedMatrix<T>::MYROW = -1;
+template <typename T> int DistributedMatrix<T>::MYCOL = -1;
+
+// Explicit instantiation
+// template class Scalapack<float>;
+// template class Scalapack<double>;
+
+/*
+template void Scalapack<float>::matrixInversion(MPI_Comm comm, float *global_A,
+                                                int M, int N, const int MB,
+                                                const int NB, const int NPROW,
+                                                const int NPCOL);
+
+template void Scalapack<double>::matrixInversion(MPI_Comm comm,
+                                                 double *global_A, int M, int N,
+                                                 const int MB, const int NB,
+                                                 const int NPROW,
+                                                 const int NPCOL);
+//-----
+template std::vector<float>
+Scalapack<float>::EigensolverForHermitian(MPI_Comm comm, float *global_A, int M,
+                                          int N, int MB, int NB,
+                                          const int NPROW, const int NPCOL);
+
+template std::vector<float>
+Scalapack<fcomplex>::EigensolverForHermitian(MPI_Comm comm, fcomplex *global_A,
+                                             int M, int N, int MB, int NB,
+                                             const int NPROW, const int NPCOL);
+
+template std::vector<double>
+Scalapack<double>::EigensolverForHermitian(MPI_Comm comm, double *global_A,
+                                           int M, int N, int MB, int NB,
+                                           const int NPROW, const int NPCOL);
+
+template std::vector<typename dcomplex::value_type>
+Scalapack<dcomplex>::EigensolverForHermitian(MPI_Comm comm, dcomplex *global_A,
+                                             int M, int N, int MB, int NB,
+                                             const int NPROW, const int NPCOL);
+*/
 
 #endif // CPP_PARALLELLINEARALGEBRA_HPP
